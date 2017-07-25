@@ -1,0 +1,123 @@
+#!/bin/sh
+# Shebang поставлен, чтобы редакторы нормально подсвечивали
+
+# Хорошо бы сделать так, чтобы в tty2 не появлялось "tty2:~# tty2:~#" никогда, при любых манипуляциях с моими init'ами
+# Shell-скрипты всё-таки идеальны для отладки загрузки и проблем с компом. Так что полностью переписывать на C не надо. Скажем, комп с systemd перестал грузиться, и вот я правлю по-всякому скрипт finit и смотрю, что происходит
+
+# Вообще не меняет окружение (при условии того, что оно удовлетворяет элементарным предположениям о любом early userspace, например cwd - это /). То есть пригодна для изучения early userspace
+asutils_init_init(){
+	[ $$ != 1 ] && printf "\\033[1;31m${0##*/}: PID isn't 1\\033[0m\\n" >&2 && exit 1
+
+	[ -z "$3" ] && ASUTILS_LOG=/dev/console || ASUTILS_LOG="$3"
+
+	if [ -c "$ASUTILS_LOG" ]; then
+		if [ ! -d /scripts ] && [ "$ASUTILS_LOG" = /dev/console ]; then
+			chvt 1 2> /dev/null || printf "\\033[1;31m${0##*/}: chvt: not found\\033[0m\\n" >> "$ASUTILS_LOG" # clear почистит это сообщение
+		fi
+
+		exec < "$ASUTILS_LOG" >> "$ASUTILS_LOG" 2>&1
+
+		# Linux не очищает экран нормально при старте в Qemu. clear может быть недоступен
+		printf '\033[H\033[J'
+	else
+		exec < /dev/null >> "$ASUTILS_LOG" 2>&1
+	fi
+
+	# Обычно я использую bash, если где-либо в тексте скрипта встречается trap, так как bash активирует его не только при "обычном" завершении, но и при получении сигнала. Но в данном случае нам не нужна эта фича
+	if ! trap 'printf "\\033[1;31m${0##*/}: panic'"$1"'\\033[0m\\n" && '"$2" EXIT; then
+		printf "\\033[1;31m${0##*/}: cannot trap\\033[0m\\n"
+		set +e
+	fi
+
+	echo "${0##*/}: starting"
+
+	# If another init executes us
+	cd /
+}
+
+asutils_init_kernfs(){
+	echo "${0##*/}: mounting kernel file systems (if any)"
+
+	if [ ! -d /dev ] || [ ! -d /proc ] || [ ! -d /run ] || [ ! -d /sys ]; then
+		printf "\\033[1;31m${0##*/}: /dev, /proc, /run or /sys not found\\033[0m\\n"
+		exit 1 # Panic
+	fi
+
+	# /dev already mounted by modern Linux kernel or by initramfs (on Debian)
+	mount -t proc   none /proc    2> /dev/null || :
+	mount -t devpts none /dev/pts 2> /dev/null || :
+	grep -q "^[^ ]* /run" /proc/mounts || mount -t tmpfs none /run
+	mount -t sysfs  none /sys     2> /dev/null || :
+
+	mkdir /run/lock
+}
+
+asutils_init_env(){
+	export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin # Standard Debian PATH
+	export USER=root
+	export HOME=/root
+
+	if [ -x /bin/bash ]; then
+		export SHELL=/bin/bash
+	else
+		export SHELL=/bin/sh
+	fi
+
+	if validlocale ru_RU.UTF-8 > /dev/null 2>&1; then
+		export LANG=ru_RU.UTF-8
+	else
+		export LANG=C
+	fi
+
+	if validlocale en_US.UTF-8 > /dev/null 2>&1; then
+		export LC_MESSAGES=en_US.UTF-8
+	else
+		export LC_MESSAGES=C
+	fi
+}
+
+asutils_init_mount_all(){
+	echo "${0##*/}: remounting root"
+	mount -o remount,rw /
+
+	# Используем то, что /etc/mtab - это симлинк на /proc/mounts
+	echo "${0##*/}: mounting all file systems"
+	mount -a || : # "mount -a" may return non-zero without reason
+}
+
+asutils_init_tty(){
+	echo "${0##*/}: initializing terminals"
+
+	TERMINALS="2 3 4 5 6"
+
+	cd "$HOME"
+
+	# SAK убивает respawner
+	if type openvt > /dev/null 2>&1; then
+		for I in $TERMINALS; do
+			printf '\033[H\033[J' > "/dev/tty$I"
+			openvt -c "$I" -- sh -c "while :; do bash; done"
+		done
+	else
+		printf "\\033[1;31m${0##*/}: openvt not found, signals will not work\\033[0m\\n" >&2
+		for I in $TERMINALS; do
+			printf '\033[H\033[J' > "/dev/tty$I"
+			setsid sh -c "exec < /dev/tty$I > /dev/tty$I 2>&1; while :; do bash; done" &
+		done
+	fi
+
+	cd /
+
+	echo 3 > /proc/sysrq-trigger # Чтоб не засорять tty2 всякими сообщениями ядра
+
+	# Должно быть после основного цикла, иначе openvt не откроет tty2
+	chvt 2 2> /dev/null || printf "\\033[1;31m${0##*/}: chvt: not found\\033[0m\\n" >&2
+}
+
+asutils_init_move(){
+	echo "${0##*/}: moving kernel file systems to new root"
+	mount --move /dev /root/dev
+	mount --move /run /root/run
+	mount --move /sys /root/sys
+	mount --move /proc /root/proc # "mount --move /proc ..." must be last, because initramfs's "mount" doesn't understand "--move" if /proc is not mounted
+}

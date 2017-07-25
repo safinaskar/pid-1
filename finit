@@ -1,0 +1,272 @@
+#!/bin/bash
+# because of: "read -e", "shift"
+# Есть ещё один finit: http://freecode.com/projects/finit , http://helllabs.org/finit/
+# Идея из cdebootstrap --foreign: mount -n -o remount,rw rootfs /
+
+set -e
+
+. asutils-init
+
+h(){
+	echo "h or help                        This help"
+	echo "be                               Begin (initialize OS)"
+	echo "en                               End (deinitialize OS)"
+	echo
+	echo "i [ARG]...                       Deinitialize OS and execute /sbin/init"
+	echo
+	echo "pi DEVICE [DIR [INIT [ARG]...]]  Deinitialize OS and pivot_root"
+	echo
+	echo "b                                Deinitialize OS and reboot"
+	echo "o                                Deinitialize OS and power off"
+}
+
+help(){
+	h
+}
+
+be(){
+	asutils_init_env
+
+	# Это нужно сделать в том числе для отмены snapshot'а (если он есть), так как мы могли загрузиться с помощью no-resume
+	echo "${0##*/}: activating swaps"
+	swapon -a
+
+	asutils_init_mount_all
+
+	hostname "$(cat /etc/hostname)" || : # hostname перед tty, чтобы bash'и показали правильный hostname
+
+	asutils_init_tty
+
+	# I need gpm, console-cyrillic, network-manager and qemu-kvm
+	# Also I want KDE working
+
+	# gpm depends on udev
+	# network-manager depends on udev and dbus
+	# KDE depends on ifupdown-clean
+	# dbus maybe depends on udev
+	# qemu-kvm depends on ???
+	# ifupdown-clean depends on ???
+
+	SERVICES="udev ifupdown-clean dbus gpm console-cyrillic network-manager qemu-kvm"
+
+	# We can use "tac" because file systems are mounted, so /tmp is available (tac uses /tmp)
+	REVERSE_SERVICES="$(echo "$SERVICES" | tac -s ' ')"
+
+	for SERVICE in $SERVICES; do
+		[ -x "/etc/init.d/$SERVICE" ] && "/etc/init.d/$SERVICE" start || :
+	done
+}
+
+umount_fs(){
+	echo "${0##*/}: unmounting file systems"
+
+	sync
+
+	# I unmount two times, because of "-o loop" mounts
+	cut -d ' ' -f 2 /proc/mounts | sort -r | while read POINT; do
+		case "$POINT" in
+			/|/dev|/dev/pts|/proc|/run|/sys) :;;
+			*) umount -r "$POINT" 2> /dev/null || :;;
+		esac
+	done
+
+	cut -d ' ' -f 2 /proc/mounts | sort -r | {
+		OK=true
+
+		while read POINT; do
+			case "$POINT" in
+				/|/dev|/dev/pts|/proc|/run|/sys) :;;
+				*) umount -r "$POINT" || OK=false;;
+			esac
+		done
+
+		mount -o remount,ro / || OK=false
+
+		# Такой вариант развития событий возможен, если используются вложенные loop mounts. Он постоянно происходит без всякой причины, но это не важно
+		if ! $OK; then
+			echo u > /proc/sysrq-trigger
+			sleep 1
+		fi
+	}
+}
+
+en(){
+	# Если мы вызываем "en" второй раз, то /tmp может быть недоступен. Поэтому я не использую "tac", а вместо этого использую заранее созданную переменную "REVERSE_SERVICES"
+	for SERVICE in $REVERSE_SERVICES; do
+		[ -x "/etc/init.d/$SERVICE" ] && "/etc/init.d/$SERVICE" stop || :
+	done
+
+	cd /proc
+	exec 2> /dev/null # We don't want see error messages about "kill -TERM mounts" and "Hangup"
+
+	# Если я отправлю сигнал самому себе, то в некоторых shell'ах (например, в bash'е, но не в dash'е) это может привести к срабатыванию trap'а
+	echo "${0##*/}: sending all processes TERM signal"
+	for I in *; do
+		if [ "$I" != 1 ]; then
+			kill -TERM "$I" || :
+		fi
+	done
+
+	# Now bash will save its history
+	echo "${0##*/}: sending all bashes HUP signal"
+	for I in *; do
+		if [ "$I" != 1 ] && [ "$(readlink "$I/exe")" = /bin/bash ]; then
+			kill -HUP "$I" || :
+		fi
+	done
+
+	sleep 1
+
+	echo "${0##*/}: sending all processes KILL signal"
+	for I in *; do
+		if [ "$I" != 1 ]; then
+			kill -KILL "$I" || :
+		fi
+	done
+
+	sleep 1
+
+	exec 2> /dev/console
+	cd /
+
+	umount_fs
+
+	echo "${0##*/}: deactivating swaps"
+	swapoff -a
+
+	for I in /dev/tty*; do
+		case "$I" in
+			/dev/tty|/dev/tty0) :;;
+			*) printf '\033[H\033[J' > "$I" || :;;
+		esac
+	done
+
+	unset LC_ALL
+	unset USER
+	unset SHELL
+
+	export HOME=/
+	export PATH=/sbin:/usr/sbin:/bin:/usr/bin # Debian initramfs PATH
+}
+
+i(){
+	[ ! -x /sbin/init ] && printf "\\033[1;31mi: /sbin/init: not executable\\033[0m\\n" >&2 && return 1
+
+	en
+
+	echo "${0##*/}: executing /sbin/init"
+	exec /sbin/init "$@"
+}
+
+pi(){
+	[ $# -lt 1 ] && echo "Usage: pi DEVICE [DIR [INIT [ARG]...]]" >&2 && return 1
+
+	DEVICE="$1"
+	[ -z "$2" ] && DIR=/ || DIR="$2"
+	[ -z "$3" ] && INIT="$0" || INIT="$3"
+
+	en
+
+	mkdir -p /root /mnt
+	mount -o ro "$DEVICE" /mnt 2> /dev/null || mount "$DEVICE" /mnt
+
+	shift # shift never fails in bash
+	shift
+	shift
+
+	if ! [ -d "/mnt/$DIR" ]; then
+		echo "\\033[1;31m${0##*/}: /mnt/$DIR: no such directory\\033[0m\\n" >&2
+		umount /mnt
+		return 1
+	fi
+
+	mount --bind "/mnt/$DIR" /root
+	umount /mnt
+
+	if [ ! -d /root/dev ] || [ ! -d /root/proc ] || [ ! -d /root/root ] || [ ! -d /root/run ] || [ ! -d /root/sys ]; then
+		printf "\\033[1;31m${0##*/}: /dev, /proc, /root, /run or /sys not found in the new root\\033[0m\\n" >&2
+		umount /root
+		return 1
+	fi
+
+	if [ ! -x "/root/$INIT" ]; then
+		printf "\\033[1;31m${0##*/}: $INIT: not executable; all will be reverted; you can just type \"be\" and you will return to your prev system\\033[0m\\n" >&2
+		umount /root
+		return 1
+	fi
+
+	if ! chroot /root /bin/sh -c : 2> /dev/null; then
+		printf "\\033[1;31m${0##*/}: test \"chroot /root /bin/sh\" failed\\033[0m\\n" >&2
+		umount /root
+		return 1
+	fi
+
+	asutils_init_move
+
+	echo "${0##*/}: doing pivot_root and chrooting"
+
+	cd /root
+
+	if ! pivot_root . root; then
+		cd /
+		mount --move /root/proc /proc
+		mount --move /root/dev /dev
+		mount --move /root/run /run
+		mount --move /root/sys /sys
+		umount /root
+		return 1
+	fi
+
+	exec chroot . /bin/sh -ec '
+		panic(){
+			printf "\\033[1;31m${0##*/}: panic\\033[0m\\n" >&2
+			exec bash
+		}
+
+		trap panic EXIT
+
+		echo "${0##*/}: unmounting old root"
+		umount /root
+
+		echo "${0##*/}: executing new init"
+		exec "$@"
+	' "$0" "/$INIT" "$@" < dev/console > dev/console 2>&1
+}
+
+b(){
+	en
+
+	echo "${0##*/}: will now reboot"
+	echo b > /proc/sysrq-trigger
+
+	while :; do
+		:
+	done
+}
+
+o(){
+	en
+
+	echo "${0##*/}: will now power off"
+	echo o > /proc/sysrq-trigger
+
+	while :; do
+		:
+	done
+}
+
+repl(){
+	while :; do
+		if read -erp "${0##*/}> " FINIT_COMMAND; then
+			# "set -e" не влияет на $FINIT_COMMAND (в том числе на запускаемые из этого шела функции) и это плохо. Но это не важно :)
+			eval "$FINIT_COMMAND" || :
+		else
+			echo "^D"
+		fi
+	done
+}
+
+asutils_init_init ", opening (last) repl" repl
+asutils_init_kernfs
+be
+repl

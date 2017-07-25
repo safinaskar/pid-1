@@ -1,0 +1,12 @@
+#!/bin/sh
+
+set -e
+
+. asutils-init
+
+asutils_init_init "" "exec bash"
+asutils_init_kernfs
+asutils_init_env
+asutils_init_mount_all
+
+exec bash
