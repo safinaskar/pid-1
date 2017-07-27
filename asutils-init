@@ -12,7 +12,7 @@ asutils_init_init(){
 
 	if [ -c "$ASUTILS_LOG" ]; then
 		if [ ! -d /scripts ] && [ "$ASUTILS_LOG" = /dev/console ]; then
-			chvt 1 2> /dev/null || printf "\\033[1;31m${0##*/}: chvt: not found\\033[0m\\n" >> "$ASUTILS_LOG" # clear почистит это сообщение
+			chvt 1
 		fi
 
 		exec < "$ASUTILS_LOG" >> "$ASUTILS_LOG" 2>&1
@@ -93,18 +93,10 @@ asutils_init_tty(){
 	cd "$HOME"
 
 	# SAK убивает respawner
-	if type openvt > /dev/null 2>&1; then
-		for I in $TERMINALS; do
-			printf '\033[H\033[J' > "/dev/tty$I"
-			openvt -c "$I" -- sh -c "while :; do bash; done"
-		done
-	else
-		printf "\\033[1;31m${0##*/}: openvt not found, signals will not work\\033[0m\\n" >&2
-		for I in $TERMINALS; do
-			printf '\033[H\033[J' > "/dev/tty$I"
-			setsid sh -c "exec < /dev/tty$I > /dev/tty$I 2>&1; while :; do bash; done" &
-		done
-	fi
+	for I in $TERMINALS; do
+		printf '\033[H\033[J' > "/dev/tty$I"
+		openvt -c "$I" -- sh -c "while :; do bash; done"
+	done
 
 	cd /
 

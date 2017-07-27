@@ -2,6 +2,7 @@
 # because of: "read -e", "shift"
 # Есть ещё один finit: http://freecode.com/projects/finit , http://helllabs.org/finit/
 # Идея из cdebootstrap --foreign: mount -n -o remount,rw rootfs /
+# Всевозможные finit'ы не должны реально очищать экран, а то они почистят окно терминала, из которого я запустил контейнер
 
 set -e
 

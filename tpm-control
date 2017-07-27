@@ -1,7 +1,8 @@
 PACKAGE='safinaskar/pid-1'
 ARCH='all'
 
-DEPENDS='prog:bash:bash prog:chroot:coreutils prog:grep:grep prog:hostname:hostname prog:mount:mount prog:pivot_root:util-linux prog:readlink:coreutils prog:setsid:util-linux prog:swapoff:mount prog:swapon:mount prog:sync:coreutils prog:tac:coreutils prog:umount:mount prog:validlocale:locales'
+# Этот пакет действительно требует наличия /run, но я не считаю себя в праве его создавать
+DEPENDS='prog:bash:bash prog:chroot:coreutils prog:grep:grep prog:hostname:hostname prog:mount:mount prog:pivot_root:util-linux prog:readlink:coreutils prog:setsid:util-linux prog:swapoff:mount prog:swapon:mount prog:sync:coreutils prog:tac:coreutils prog:umount:mount prog:validlocale:locales prog:openvt:kbd prog:chvt:kbd'
 BUILD_DEPENDS='prog:cmake:cmake prog:make:make'
 LIBS=''
 INSTALL='[ -e CMakeCache.txt ] && echo "Failed: CMakeCache.txt" && exit 1;'\
